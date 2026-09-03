@@ -11,3 +11,49 @@ test/sim_build
 test/__pycache__/
 test/results.xml
 test/gate_level_netlist.v
+
+# --- Python -----------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# pyenv sets the version per directory; commit .python-version so others
+# know which interpreter this was built against
+# .python-version
+
+# --- training ---------------------------------------------------------
+# Datasets are large and fetched from NIST. Do not commit them.
+*.gz
+*.zip
+*.idx*-ubyte
+emnist*/
+
+# Sweep logs and intermediate runs
+*.log
+sweep_results.csv
+weights/
+
+# The chosen weights ARE part of the design -- they become src/backbone.v.
+# Commit them so the chip is reproducible from this repo.
+!weights_f56.npz
+
+# --- simulation -------------------------------------------------------
+sim_build/
+results.xml
+*.vcd
+*.fst
+*.vvp
+
+# --- synthesis and hardening ------------------------------------------
+runs/
+*.lib
+tt_submission/
+
+# --- editors and OS ---------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
