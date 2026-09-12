@@ -12,11 +12,13 @@ Synchronise on done. Never on a count of score pulses.
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, RisingEdge
+from cocotb.triggers import ClockCycles, RisingEdge, Timer
 
 HEAD_BITS = "000001000000001000000010000000100000000100000000000010000000000001100100001000000001000000000010001001010010000000010000000001000100000000000000000100010000000001000000000001000010100000100100100010000101001000000000100000000110000000000101000000000000010000100100010000000000001000011001000101000000100000000001000001000110000110100001000010010000010000000000011000000100100110000000000100000000100000010000000000000000100101100001011010100010100110010000010010000010010000000000000000010000000001010000000001000010101001011010000100000000000000010001000010000010010010000100011001100000000001000100100001010000000100000001010000101010000001100001010000101000011010100101000110100000001000000001001001000000001000010010"
 CYCLES = 784
 NCLASS = 6
+
+NFEAT = 56
 
 VECTORS = [
     ("1001110000110001100000111010100100100000001000000100000011011001", [0, 1, 2, 4, 1, 4]),
@@ -29,6 +31,14 @@ VECTORS = [
     ("0000000001000000010000111000000001000000001110011000000001000000", [1, 1, 4, 2, -2, 7])
 ]
 
+# (image, scores, features) -- the features are what the frozen half emits
+FEATURE_VECTORS = [
+    ("1001110000110001100000111010100100100000001000000100000011011001", [0, 1, 2, 4, 1, 4], [0, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1]),
+    ("1000001100101001001010100001010000000001100000000100001110100110", [-5, 3, 3, 2, 4, 6], [1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1]),
+    ("1000000010000000000110010000000000000000010000000101001000011000", [-2, 5, 1, 4, 3, 7], [1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1]),
+    ("0000000001100011100110000000000101001001110010000100001001000000", [-2, 5, 2, 3, 0, 6], [1, 0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0, 1, 1])
+]
+
 
 def _val(sig):
     """Read a signal, treating x/z as 0.
@@ -39,10 +49,11 @@ def _val(sig):
     return int(sig.value.binstr.lower().replace("x", "0").replace("z", "0"), 2)
 
 
-def _pins(dut, img_bit=0, img_shift=0, go=0, hd_bit=0, hd_shift=0):
+def _pins(dut, img_bit=0, img_shift=0, go=0, hd_bit=0, hd_shift=0,
+          feat_shift=0):
     dut.ui_in.value = ((img_bit & 1) | ((img_shift & 1) << 1) |
                        ((go & 1) << 2) | ((hd_bit & 1) << 3) |
-                       ((hd_shift & 1) << 4))
+                       ((hd_shift & 1) << 4) | ((feat_shift & 1) << 5))
 
 
 async def reset(dut):
@@ -115,6 +126,62 @@ async def test_reload_head(dut):
     await load_head(dut)
     second = await classify(dut, VECTORS[0][0])
     assert first == second, f"reload changed the result: {first} vs {second}"
+
+
+async def read_features(dut, n):
+    """Shift the feature vector out on uio_out[6], one bit per pulse.
+
+    feat_bit is combinational off the index register, so let it settle
+    before sampling -- reading straight after the edge catches the old
+    value.
+    """
+    bits = []
+    for _ in range(n):
+        await Timer(1, "ns")
+        bits.append((_val(dut.uio_out) >> 6) & 1)
+        _pins(dut, feat_shift=1)
+        await ClockCycles(dut.clk, 1)
+        _pins(dut)
+    return bits
+
+
+@cocotb.test()
+async def test_feature_readout(dut):
+    """The 56 features must match the numpy model bit for bit.
+
+    This is the extractor claim: the frozen half of the chip computes the
+    same features in silicon that it does in software.
+    """
+    cocotb.start_soon(Clock(dut.clk, 100, units="ns").start())
+    await reset(dut)
+    await load_head(dut)
+
+    for n, (img, _expect, feats) in enumerate(FEATURE_VECTORS):
+        await classify(dut, img)
+        got = await read_features(dut, len(feats))
+        assert got == list(feats), (
+            f"image {n}: features differ at "
+            f"{[i for i, (a, b) in enumerate(zip(got, feats)) if a != b]}")
+    dut._log.info(f"{len(FEATURE_VECTORS)} feature vectors bit-exact")
+
+
+@cocotb.test()
+async def test_features_independent_of_head(dut):
+    """Reloading the head must not change the features.
+
+    The frozen half is frozen. Only the 90 bytes move.
+    """
+    cocotb.start_soon(Clock(dut.clk, 100, units="ns").start())
+    await reset(dut)
+    await load_head(dut)
+    img = FEATURE_VECTORS[0][0]
+    await classify(dut, img)
+    first = await read_features(dut, NFEAT)
+
+    await load_head(dut)
+    await classify(dut, img)
+    second = await read_features(dut, NFEAT)
+    assert first == second, "features changed after a head reload"
 
 
 @cocotb.test()

@@ -30,7 +30,7 @@ pinout:
   ui[2]: "go"
   ui[3]: "head_bit"
   ui[4]: "head_shift"
-  ui[5]: "unused"
+  ui[5]: "feat_shift"
   ui[6]: "unused"
   ui[7]: "unused"
   uo[0]: "score[0]"
@@ -47,8 +47,8 @@ pinout:
   uio[3]: "class[0]"
   uio[4]: "class[1]"
   uio[5]: "class[2]"
-  uio[6]: "unused"
-  uio[7]: "unused"
+  uio[6]: "feat_bit"
+  uio[7]: "feat_wrap"
 
 # Do not change!
 yaml_version: 6
