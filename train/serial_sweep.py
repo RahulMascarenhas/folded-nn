@@ -57,18 +57,18 @@ def emit_serial_backbone(W, biases, lanes):
 
     L = []
     L.append(f"// {n_feat} features, {lanes} lanes, {passes} passes")
-    L.append(f"module backbone (")
-    L.append(f"    input  wire clk,")
-    L.append(f"    input  wire rst_n,")
-    L.append(f"    input  wire start,")
-    L.append(f"    input  wire pix,")
+    L.append("module backbone (")
+    L.append("    input  wire clk,")
+    L.append("    input  wire rst_n,")
+    L.append("    input  wire start,")
+    L.append("    input  wire pix,")
     L.append(f"    output reg  [{n_feat - 1}:0] features,")
-    L.append(f"    output reg  done")
-    L.append(f");")
-    L.append(f"    reg [5:0] idx;")
+    L.append("    output reg  done")
+    L.append(");")
+    L.append("    reg [5:0] idx;")
     L.append(f"    reg [{pass_w - 1}:0] pnum;")
     L.append(f"    wire [{pass_w + 5}:0] rom = {{pnum, idx}};")
-    L.append(f"    reg busy;")
+    L.append("    reg busy;")
     L.append(f"    wire [{pass_w - 1}:0] pnum_next = pnum + {pass_w}'d1;")
 
     # weight ROMs: one +1 vector and one -1 vector per lane

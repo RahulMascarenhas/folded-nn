@@ -2,8 +2,11 @@
 """Check the emitted serial backbone against a numpy golden model.
 Run this before trusting any area number."""
 
-import sys, subprocess, tempfile
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
+
 import numpy as np
 import serial_sweep as S
 

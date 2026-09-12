@@ -33,8 +33,8 @@ from pathlib import Path
 
 import numpy as np
 
-
 # --------------------------------------------------------------- data
+
 
 def to_8x8_binary(images, threshold=0.15, chunk=20000):
     """28x28 greyscale -> 8x8 binary.
@@ -48,11 +48,11 @@ def to_8x8_binary(images, threshold=0.15, chunk=20000):
     n = images.shape[0]
     out = np.empty((n, 64), dtype=np.float32)
     for i in range(0, n, chunk):
-        x = images[i:i + chunk].astype(np.float32) / 255.0
+        x = images[i : i + chunk].astype(np.float32) / 255.0
         m = x.shape[0]
-        x = np.pad(x, ((0, 0), (2, 2), (2, 2)))          # 28 -> 32
-        x = x.reshape(m, 8, 4, 8, 4).mean(axis=(2, 4))   # 32 -> 8
-        out[i:i + m] = (x > threshold).astype(np.float32).reshape(m, 64)
+        x = np.pad(x, ((0, 0), (2, 2), (2, 2)))  # 28 -> 32
+        x = x.reshape(m, 8, 4, 8, 4).mean(axis=(2, 4))  # 32 -> 8
+        out[i : i + m] = (x > threshold).astype(np.float32).reshape(m, 64)
     return out
 
 
@@ -96,7 +96,7 @@ def fetch_idx(name):
         dest.unlink(missing_ok=True)
         sys.exit(f"download failed: {e}\n  try manually:  curl -L -o {dest} {url}")
 
-    if dest.stat().st_size < 1000:   # an error page, not data
+    if dest.stat().st_size < 1000:  # an error page, not data
         dest.unlink()
         sys.exit(f"got a tiny file from {url} -- the mirror may have moved")
     return dest
@@ -105,6 +105,7 @@ def fetch_idx(name):
 def load_emnist_hf(split="balanced", transpose=True, pix=0.15):
     """Load EMNIST from local cache or the HuggingFace mirror. Converts each
     array to 8x8 immediately so the large uint8 arrays do not pile up."""
+
     def get(kind, usage):
         a = read_idx(fetch_idx(f"emnist-{split}-{usage}-{kind}"))
         if kind.startswith("idx3") and transpose:
@@ -121,7 +122,7 @@ def load_emnist_hf(split="balanced", transpose=True, pix=0.15):
 
 def load_emnist(split="balanced", transpose=True):
     try:
-        from emnist import extract_training_samples, extract_test_samples
+        from emnist import extract_test_samples, extract_training_samples
     except ImportError:
         sys.exit("pip install emnist   (see the notes at the bottom of this file)")
 
@@ -141,12 +142,14 @@ def load_digits_8x8():
     """sklearn's 8x8 digits -- already the right size. For smoke testing."""
     from sklearn.datasets import load_digits
     from sklearn.model_selection import train_test_split
+
     d = load_digits()
     x = (d.images / 16.0 > 0.3).astype(np.float32).reshape(-1, 64)
     return train_test_split(x, d.target, test_size=0.25, random_state=0)
 
 
 # ------------------------------------------------------- quantisation
+
 
 def ternarise(w, thresh_scale=0.7):
     """Weights below a threshold become 0; the rest become +1 or -1.
@@ -172,12 +175,13 @@ class Adam:
         self.t += 1
         self.m = b1 * self.m + (1 - b1) * g
         self.v = b2 * self.v + (1 - b2) * g * g
-        mh = self.m / (1 - b1 ** self.t)
-        vh = self.v / (1 - b2 ** self.t)
+        mh = self.m / (1 - b1**self.t)
+        vh = self.v / (1 - b2**self.t)
         return w - self.lr * mh / (np.sqrt(vh) + eps)
 
 
 # ---------------------------------------------------------- the model
+
 
 class Net:
     def __init__(self, n_feat, n_class, thresh=0.7, seed=0):
@@ -187,8 +191,7 @@ class Net:
         self.W2 = rng.normal(0, 0.5, (n_feat, n_class)).astype(np.float32)
         self.b2 = np.zeros(n_class, dtype=np.float32)
         self.thresh = thresh
-        self.opt = {k: Adam(getattr(self, k).shape)
-                    for k in ("W1", "b1", "W2", "b2")}
+        self.opt = {k: Adam(getattr(self, k).shape) for k in ("W1", "b1", "W2", "b2")}
 
     def forward(self, x, train=True):
         W1q = ternarise(self.W1, self.thresh)
@@ -238,8 +241,7 @@ class Net:
         np.clip(self.W2, -1.5, 1.5, out=self.W2)
 
     def snapshot(self):
-        return (self.W1.copy(), self.b1.copy(),
-                self.W2.copy(), self.b2.copy())
+        return (self.W1.copy(), self.b1.copy(), self.W2.copy(), self.b2.copy())
 
     def restore(self, snap):
         self.W1, self.b1, self.W2, self.b2 = [a.copy() for a in snap]
@@ -247,13 +249,17 @@ class Net:
     def accuracy(self, x, y, batch=4096):
         correct = 0
         for i in range(0, len(x), batch):
-            lo = self.forward(x[i:i + batch], train=False)
-            correct += (lo.argmax(axis=1) == y[i:i + batch]).sum()
+            lo = self.forward(x[i : i + batch], train=False)
+            correct += (lo.argmax(axis=1) == y[i : i + batch]).sum()
         return correct / len(x)
 
     def quantised(self):
-        return (ternarise(self.W1, self.thresh), self.b1,
-                ternarise(self.W2, self.thresh), self.b2)
+        return (
+            ternarise(self.W1, self.thresh),
+            self.b1,
+            ternarise(self.W2, self.thresh),
+            self.b2,
+        )
 
 
 def train(net, xtr, ytr, xte, yte, epochs, batch, l1, seed=0):
@@ -265,39 +271,58 @@ def train(net, xtr, ytr, xte, yte, epochs, batch, l1, seed=0):
     for ep in range(epochs):
         order = rng.permutation(n)
         for i in range(0, n, batch):
-            idx = order[i:i + batch]
+            idx = order[i : i + batch]
             net.backward(net.forward(xtr[idx]), ytr[idx], l1=l1)
         if ep % max(1, epochs // 20) == 0 or ep == epochs - 1:
             acc = net.accuracy(xte, yte)
             if acc > best_acc:
                 best_acc, best_snap = acc, net.snapshot()
             if ep % max(1, epochs // 5) == 0 or ep == epochs - 1:
-                print(f"    epoch {ep:>3}  test {acc:.4f}"
-                      f"{'  *' if acc == best_acc else ''}")
+                print(
+                    f"    epoch {ep:>3}  test {acc:.4f}"
+                    f"{'  *' if acc == best_acc else ''}"
+                )
     net.restore(best_snap)
     return best_acc
 
 
 # -------------------------------------------------------------- main
 
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", choices=["emnist", "digits"], default="emnist")
-    ap.add_argument("--source", choices=["hf", "pkg"], default="hf",
-                    help="hf = HuggingFace mirror (works); pkg = emnist package (NIST url is dead)")
-    ap.add_argument("--split", default="balanced",
-                    help="emnist split: balanced (47 classes), byclass, digits")
+    ap.add_argument(
+        "--source",
+        choices=["hf", "pkg"],
+        default="hf",
+        help="hf = HuggingFace mirror (works); pkg = emnist package (NIST url is dead)",
+    )
+    ap.add_argument(
+        "--split",
+        default="balanced",
+        help="emnist split: balanced (47 classes), byclass, digits",
+    )
     ap.add_argument("--features", type=int, nargs="+", default=[32, 40, 48, 56])
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=3e-2)
-    ap.add_argument("--thresh", type=float, default=0.7,
-                    help="ternary threshold scale; higher = more zeros")
-    ap.add_argument("--l1", type=float, default=0.0,
-                    help="L1 penalty; higher = more zeros")
+    ap.add_argument(
+        "--thresh",
+        type=float,
+        default=0.7,
+        help="ternary threshold scale; higher = more zeros",
+    )
+    ap.add_argument(
+        "--l1", type=float, default=0.0, help="L1 penalty; higher = more zeros"
+    )
     ap.add_argument("--no-transpose", action="store_true")
-    ap.add_argument("--pix-thresh", type=float, default=0.15,
-                    help="pixel binarisation threshold; higher = thinner strokes")
+    ap.add_argument(
+        "--pix-thresh",
+        type=float,
+        default=0.15,
+        help="pixel binarisation threshold; higher = thinner strokes",
+    )
     ap.add_argument("--out-prefix", default="weights")
     args = ap.parse_args()
 
@@ -305,7 +330,8 @@ def main():
         print(f"loading emnist '{args.split}' via {args.source} ...")
         if args.source == "hf":
             xtr, ytr, xte, yte = load_emnist_hf(
-                args.split, not args.no_transpose, args.pix_thresh)
+                args.split, not args.no_transpose, args.pix_thresh
+            )
         else:
             xtr, ytr, xte, yte = load_emnist(args.split, not args.no_transpose)
     else:
@@ -336,10 +362,17 @@ def main():
         z2 = float((W2q == 0).mean())
 
         path = f"{args.out_prefix}_f{f}.npz"
-        np.savez(path, W1=W1q.T.astype(np.int8), b1=np.round(b1).astype(np.int32),
-                 W2=W2q.T.astype(np.int8), b2=np.round(b2).astype(np.int32),
-                 features=f, classes=n_class, accuracy=acc,
-                 zero_rate_backbone=z1)
+        np.savez(
+            path,
+            W1=W1q.T.astype(np.int8),
+            b1=np.round(b1).astype(np.int32),
+            W2=W2q.T.astype(np.int8),
+            b2=np.round(b2).astype(np.int32),
+            features=f,
+            classes=n_class,
+            accuracy=acc,
+            zero_rate_backbone=z1,
+        )
 
         print(f"{f:>5} {acc:>9.4f} {z1:>8.1%} {z2:>9.1%} {path:>22}\n")
 
