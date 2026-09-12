@@ -2,7 +2,7 @@
 //
 // Frozen ternary feature extractor with an optional on-chip classifier.
 //
-//   64 pixels -> frozen 64->56 layer (constant-folded into logic)
+//   144 pixels -> frozen 144->56 layer (constant-folded into logic)
 //             -> 56 binary features
 //             -> either read them out directly, or
 //             -> loadable 56->6 head (720 bits) -> 6 scores
@@ -44,12 +44,12 @@ module tt_um_rahulmascarenhas_folded_nn (
     wire hd_shift   = ui_in[4];
     wire feat_shift = ui_in[5];
 
-    // image register: shift 64 pixels in, then hold them still while
+    // image register: shift 144 pixels in, then hold them still while
     // the backbone makes 7 passes over them
-    reg [63:0] img;
+    reg [143:0] img;
     always @(posedge clk) begin
         if (!rst_n)         img <= 0;
-        else if (img_shift) img <= {img[62:0], img_bit};
+        else if (img_shift) img <= {img[142:0], img_bit};
     end
 
     wire [55:0] features;

@@ -27,7 +27,9 @@ import train as T
 def fit_head(net, xtr, ytr, xte, yte, n_class, epochs, batch, lr, seed=0):
     """Train only the head. The backbone weights never move."""
     rng = np.random.default_rng(seed)
-    head = T.Net(net.W1.shape[1], n_class, thresh=net.thresh, seed=seed)
+    head = T.Net(
+        net.W1.shape[1], n_class, thresh=net.thresh, seed=seed, n_in=net.W1.shape[0]
+    )
     head.W1 = net.W1.copy()  # frozen
     head.b1 = net.b1.copy()
     for k in head.opt:
@@ -51,7 +53,7 @@ def fit_head(net, xtr, ytr, xte, yte, n_class, epochs, batch, lr, seed=0):
 
 def fit_full(xtr, ytr, xte, yte, n_feat, n_class, thresh, epochs, batch, lr, seed=0):
     """Train everything on these 6 classes. This is the ceiling."""
-    net = T.Net(n_feat, n_class, thresh=thresh, seed=seed)
+    net = T.Net(n_feat, n_class, thresh=thresh, seed=seed, n_in=xtr.shape[1])
     for k in net.opt:
         net.opt[k].lr = lr
     rng = np.random.default_rng(seed)
@@ -92,10 +94,13 @@ def main():
     ap.add_argument("--head-epochs", type=int, default=120)
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--split", default="balanced")
+    ap.add_argument(
+        "--grid", type=int, default=8, help="input resolution, e.g. 8 or 12"
+    )
     args = ap.parse_args()
 
     print(f"loading emnist '{args.split}' ...")
-    xtr, ytr, xte, yte = T.load_emnist_hf(args.split, True, args.pix_thresh)
+    xtr, ytr, xte, yte = T.load_emnist_hf(args.split, True, args.pix_thresh, args.grid)
     n_total = int(ytr.max()) + 1
     print(f"  {len(xtr)} train, {n_total} classes, ink {xtr.mean():.0%}\n")
 
@@ -111,7 +116,9 @@ def main():
     for n_feat in args.features:
         print(f"=== {n_feat} features ===")
         t0 = time.time()
-        backbone = T.Net(n_feat, len(trained_on), thresh=args.thresh, seed=0)
+        backbone = T.Net(
+            n_feat, len(trained_on), thresh=args.thresh, seed=0, n_in=xtr.shape[1]
+        )
         for k in backbone.opt:
             backbone.opt[k].lr = args.lr
         r = np.random.default_rng(0)
