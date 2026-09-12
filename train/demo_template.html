@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>folded-nn &mdash; frozen feature extractor</title>
+<style>
+  :root {
+    --bg:#14161a; --panel:#1c1f26; --line:#2a2f3a; --ink:#e8eaed;
+    --dim:#8b93a3; --hot:#7dd3a0; --cold:#3a4050; --blue:#6aa9e0;
+    --warn:#e0a458; --bad:#e07a6a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:22px;background:var(--bg);color:var(--ink);
+       font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+  h1{font-size:17px;font-weight:600;margin:0 0 3px}
+  .sub{color:var(--dim);margin-bottom:16px;font-size:12px}
+  .bar-top{display:flex;gap:8px;align-items:center;margin-bottom:16px;
+           flex-wrap:wrap}
+  .seg{display:flex;border:1px solid var(--line);border-radius:6px;
+       overflow:hidden}
+  .seg button{border:0;border-radius:0;background:#20242c;padding:7px 14px}
+  .seg button.on{background:var(--blue);color:#0d0f12;font-weight:600}
+  .wrap{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}
+  .panel{background:var(--panel);border:1px solid var(--line);
+         border-radius:8px;padding:14px}
+  .label{font-size:10px;color:var(--dim);margin-bottom:9px;
+         text-transform:uppercase;letter-spacing:.07em}
+  canvas{border-radius:4px;cursor:crosshair;touch-action:none;
+         background:#0d0f12;display:block}
+  .grid8{display:grid;grid-template-columns:repeat(8,16px);gap:2px}
+  .px{width:16px;height:16px;border-radius:2px;background:var(--cold)}
+  .px.on{background:var(--hot)}
+  .feat{display:grid;grid-template-columns:repeat(8,13px);gap:2px}
+  .fb{width:13px;height:13px;border-radius:2px;background:var(--cold)}
+  .fb.on{background:var(--blue)}
+  .bars{display:flex;flex-direction:column;gap:5px;min-width:250px}
+  .bar{display:flex;align-items:center;gap:7px}
+  .bar .ch{width:52px;font-weight:600;font-size:12px}
+  .bar .track{flex:1;height:18px;background:#0d0f12;border-radius:3px;
+              position:relative;overflow:hidden}
+  .bar .fill{position:absolute;top:0;bottom:0;left:50%;background:#4a5568;
+             transition:all .1s}
+  .bar.win .fill{background:var(--hot)}
+  .bar .val{width:32px;text-align:right;color:var(--dim);font-size:12px}
+  button{background:#262b34;color:var(--ink);border:1px solid var(--line);
+         border-radius:5px;padding:6px 12px;cursor:pointer;font:inherit;
+         font-size:12px}
+  button:hover{background:#2f3540}
+  select{background:#262b34;color:var(--ink);border:1px solid var(--line);
+         border-radius:5px;padding:6px 9px;font:inherit;font-size:12px}
+  .row{display:flex;gap:7px;margin-top:10px;align-items:center;flex-wrap:wrap}
+  .stat{color:var(--dim);font-size:11px;margin-top:10px;line-height:1.6}
+  .stat b{color:var(--ink);font-weight:600}
+  .hex{font-size:10px;color:var(--blue);word-break:break-all;margin-top:8px;
+       background:#0d0f12;padding:6px;border-radius:4px;line-height:1.4}
+  .note{font-size:11px;margin-top:8px;color:var(--dim)}
+  .note.warn{color:var(--warn)}
+  code{background:#0d0f12;padding:1px 4px;border-radius:3px;font-size:11px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--bad);
+       display:inline-block;margin-right:5px}
+  .dot.ok{background:var(--hot)}
+</style>
+</head>
+<body>
+
+<h1>folded-nn</h1>
+<div class="sub">
+  Frozen ternary feature extractor with an optional on-chip classifier.
+  3,584 weights cast into logic; 56 features out.
+</div>
+
+<div class="bar-top">
+  <span style="color:var(--dim);font-size:11px">SOURCE</span>
+  <div class="seg">
+    <button id="src-sim" class="on">simulated</button>
+    <button id="src-hw">hardware</button>
+  </div>
+  <span id="hwstat" style="font-size:11px;color:var(--dim)">
+    <span class="dot"></span>simulating the datapath
+  </span>
+  <button id="connect" style="display:none">connect serial</button>
+</div>
+
+<div class="wrap">
+  <div class="panel">
+    <div class="label">draw</div>
+    <canvas id="pad" width="200" height="200"></canvas>
+    <div class="row">
+      <button id="clear">clear</button>
+      <button id="ctr">normalise: on</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="label">8&times;8 in</div>
+    <div class="grid8" id="px"></div>
+    <div class="stat">64 bits on <code>ui[0]</code></div>
+  </div>
+
+  <div class="panel">
+    <div class="label">56 features &mdash; frozen, in metal</div>
+    <div class="feat" id="feat"></div>
+    <div class="stat">
+      read out on <code>uio[6]</code><br>
+      56 pulses of <code>ui[5]</code>
+    </div>
+    <div class="hex" id="fhex"></div>
+  </div>
+
+  <div class="panel" style="flex:1;min-width:270px">
+    <div class="label">on-chip head &mdash; 6 classes, 90 bytes</div>
+    <div class="bars" id="bars"></div>
+    <div class="row">
+      <select id="headsel"></select>
+    </div>
+    <div class="stat">
+      336 loadable weights &middot; <b>75% of the die</b><br>
+      swap 90 bytes to retarget
+    </div>
+  </div>
+
+  <div class="panel" style="flex:1;min-width:270px">
+    <div class="label">software head &mdash; 62 classes, host side</div>
+    <div class="bars" id="sbars"></div>
+    <div class="stat">
+      same 56 features, classifier in software<br>
+      no silicon, no six-class ceiling
+    </div>
+    <div class="note" id="snote"></div>
+  </div>
+</div>
+
+<!--CHIP_DATA-->
+<script>
+const CHIP = window.CHIP_DATA || null;
+const PIXELS=64, FEATURES=56, CLASSES=6, BIAS_W=8;
+let source='sim', port=null, writer=null, reader=null;
+let normOn=true, head=null;
+
+// ------------------------------------------------------- chip model (sim)
+function unpackHead(bits){
+  const b=new Array(bits.length);
+  for(let i=0;i<bits.length;i++) b[bits.length-1-i]=+bits[i];
+  const W=[],bias=[];
+  for(let c=0;c<CLASSES;c++){
+    const row=new Int32Array(FEATURES);
+    for(let f=0;f<FEATURES;f++){
+      const o=2*(c*FEATURES+f), code=b[o]|(b[o+1]<<1);
+      row[f]= code===1?1: code===2?-1:0;
+    }
+    W.push(row);
+  }
+  for(let c=0;c<CLASSES;c++){
+    const o=2*FEATURES*CLASSES+BIAS_W*c; let v=0;
+    for(let k=0;k<BIAS_W;k++) v|=b[o+k]<<k;
+    bias.push(v>127?v-256:v);
+  }
+  return {W,bias};
+}
+
+function simFeatures(img){
+  const out=new Int32Array(FEATURES);
+  for(let f=0;f<FEATURES;f++){
+    let acc=CHIP.b1[f];
+    for(let i=0;i<PIXELS;i++) if(img[i]) acc+=CHIP.W1[f][i];
+    out[f]= acc>=0?1:0;
+  }
+  return out;
+}
+
+function runHead(feats,h){
+  const out=[];
+  for(let c=0;c<CLASSES;c++){
+    let acc=h.bias[c];
+    for(let f=0;f<FEATURES;f++) if(feats[f]) acc+=h.W[c][f];
+    out.push(acc);
+  }
+  return out;
+}
+
+function runSoftHead(feats){
+  // The 62-class layer that trained alongside the backbone but was never
+  // taped out. Same 56 features, classifier on the host.
+  const n=CHIP.b2.length, out=new Array(n);
+  for(let c=0;c<n;c++){
+    let acc=CHIP.b2[c];
+    for(let f=0;f<FEATURES;f++) if(feats[f]) acc+=CHIP.W2[c][f];
+    out[c]=acc;
+  }
+  return out;
+}
+
+// ------------------------------------------------- hardware (Web Serial)
+// The host firmware must implement:
+//   ->  H<720 ascii bits>\n   load head
+//   ->  I<64 ascii bits>\n    classify
+//   <-  F<56 ascii bits> S<6 signed ints>\n
+async function hwConnect(){
+  if(!('serial' in navigator)){
+    setHw(false,'Web Serial not supported in this browser'); return;
+  }
+  try{
+    port=await navigator.serial.requestPort();
+    await port.open({baudRate:115200});
+    writer=port.writable.getWriter();
+    reader=port.readable.getReader();
+    setHw(true,'connected');
+    if(head) await hwLoadHead();
+    update();
+  }catch(e){ setHw(false,'connect failed: '+e.message); }
+}
+
+async function hwSend(line){
+  await writer.write(new TextEncoder().encode(line+'\n'));
+  let buf='';
+  for(let i=0;i<200;i++){
+    const {value,done}=await reader.read();
+    if(done) break;
+    buf+=new TextDecoder().decode(value);
+    if(buf.includes('\n')) return buf.trim();
+  }
+  return null;
+}
+
+async function hwLoadHead(){
+  const sel=document.getElementById('headsel').value;
+  await hwSend('H'+CHIP.heads[sel].bitstream);
+}
+
+async function hwClassify(img){
+  const r=await hwSend('I'+Array.from(img).reverse().join(''));
+  if(!r) return null;
+  const fm=r.match(/F([01]+)/), sm=r.match(/S([-\d ]+)/);
+  if(!fm) return null;
+  return {
+    feats:Int32Array.from(fm[1].split('').reverse().map(Number)),
+    sc: sm ? sm[1].trim().split(/\s+/).map(Number) : null
+  };
+}
+
+function setHw(ok,msg){
+  document.getElementById('hwstat').innerHTML=
+    '<span class="dot'+(ok?' ok':'')+'"></span>'+msg;
+}
+
+// --------------------------------------------------------- preprocessing
+function normalise(src){
+  // Crop to the ink, scale so the longer side fills 20/28, centre by mass.
+  // The same normalisation NIST applies, which the frozen features assume.
+  const N=200, TARGET=Math.round(N*20/28);
+  let minx=N,miny=N,maxx=-1,maxy=-1;
+  for(let y=0;y<N;y++) for(let x=0;x<N;x++)
+    if(src[(y*N+x)*4]>60){
+      if(x<minx)minx=x; if(x>maxx)maxx=x;
+      if(y<miny)miny=y; if(y>maxy)maxy=y;
+    }
+  if(maxx<0) return null;
+  const w=maxx-minx+1,h=maxy-miny+1;
+  const sc=TARGET/Math.max(w,h);
+  const nw=Math.max(1,Math.round(w*sc)), nh=Math.max(1,Math.round(h*sc));
+  const box=new Float32Array(nw*nh);
+  for(let y=0;y<nh;y++) for(let x=0;x<nw;x++){
+    const sx=minx+Math.floor(x/sc), sy=miny+Math.floor(y/sc);
+    box[y*nw+x]= src[(sy*N+sx)*4]>60?1:0;
+  }
+  let n=0,cy=0,cx=0;
+  for(let y=0;y<nh;y++) for(let x=0;x<nw;x++)
+    if(box[y*nw+x]){n++;cy+=y;cx+=x;}
+  if(!n) return null;
+  cy/=n; cx/=n;
+  const oy=Math.round(N/2-cy), ox=Math.round(N/2-cx);
+  const frame=new Float32Array(N*N);
+  for(let y=0;y<nh;y++) for(let x=0;x<nw;x++){
+    if(!box[y*nw+x]) continue;
+    const ty=y+oy,tx=x+ox;
+    if(ty>=0&&ty<N&&tx>=0&&tx<N) frame[ty*N+tx]=1;
+  }
+  return frame;
+}
+
+function toGrid(){
+  const N=200, B=25;
+  const d=ctx.getImageData(0,0,N,N).data;
+  const g=new Int32Array(64);
+  const f = normOn ? normalise(d) : null;
+  for(let by=0;by<8;by++) for(let bx=0;bx<8;bx++){
+    let sum=0;
+    for(let y=0;y<B;y++) for(let x=0;x<B;x++){
+      const i=(by*B+y)*N+bx*B+x;
+      sum += f ? f[i] : d[i*4]/255;
+    }
+    g[by*8+bx]= (sum/(B*B))>0.25 ?1:0;
+  }
+  return g;
+}
+
+// -------------------------------------------------------------------- ui
+const pad=document.getElementById('pad'), ctx=pad.getContext('2d');
+let drawing=false, strokes=[];
+
+function paint(){
+  ctx.fillStyle='#0d0f12'; ctx.fillRect(0,0,200,200);
+  ctx.strokeStyle='#e8eaed'; ctx.lineWidth=18;
+  ctx.lineCap='round'; ctx.lineJoin='round';
+  for(const s of strokes){
+    if(s.length<2) continue;
+    ctx.beginPath(); ctx.moveTo(s[0].x,s[0].y);
+    for(const p of s.slice(1)) ctx.lineTo(p.x,p.y);
+    ctx.stroke();
+  }
+}
+function pos(e){
+  const r=pad.getBoundingClientRect();
+  return {x:e.clientX-r.left, y:e.clientY-r.top};
+}
+pad.addEventListener('pointerdown',e=>{drawing=true;strokes.push([pos(e)]);
+  pad.setPointerCapture(e.pointerId);});
+pad.addEventListener('pointermove',e=>{if(!drawing)return;
+  strokes[strokes.length-1].push(pos(e));paint();update();});
+pad.addEventListener('pointerup',()=>{drawing=false;update();});
+
+document.getElementById('clear').onclick=()=>{strokes=[];paint();update();};
+document.getElementById('ctr').onclick=e=>{
+  normOn=!normOn;
+  e.target.textContent='normalise: '+(normOn?'on':'off'); update();
+};
+
+const pxEl=document.getElementById('px'), featEl=document.getElementById('feat');
+for(let i=0;i<64;i++){const d=document.createElement('div');d.className='px';pxEl.appendChild(d);}
+for(let i=0;i<56;i++){const d=document.createElement('div');d.className='fb';featEl.appendChild(d);}
+
+function buildBars(el,labels){
+  el.innerHTML='';
+  labels.forEach(c=>el.insertAdjacentHTML('beforeend',
+    `<div class="bar"><span class="ch">${c}</span>
+     <span class="track"><span class="fill"></span></span>
+     <span class="val">0</span></div>`));
+}
+function drawBars(el,labels,sc,scale){
+  const bars=el.querySelectorAll('.bar');
+  const win=sc.indexOf(Math.max(...sc));
+  sc.forEach((v,i)=>{
+    const b=bars[i]; if(!b) return;
+    b.classList.toggle('win',i===win);
+    b.querySelector('.ch').textContent=labels[i];
+    const w=Math.min(Math.abs(v)/scale,1)*50;
+    const f=b.querySelector('.fill');
+    f.style.left= v>=0?'50%':(50-w)+'%'; f.style.width=w+'%';
+    b.querySelector('.val').textContent=v;
+  });
+}
+
+function toHex(bits){
+  let s='';
+  for(let i=0;i<bits.length;i+=4){
+    let v=0;
+    for(let k=0;k<4;k++) v|=(bits[i+k]||0)<<(3-k);
+    s+=v.toString(16);
+  }
+  return s;
+}
+
+async function update(){
+  if(!CHIP) return;
+  const img=toGrid();
+  pxEl.childNodes.forEach((n,i)=>n.className='px'+(img[i]?' on':''));
+
+  let feats, sc=null;
+  if(source==='hw' && writer){
+    const r=await hwClassify(img);
+    if(!r){ setHw(false,'no response from device'); return; }
+    feats=r.feats; sc=r.sc;
+  }else{
+    feats=simFeatures(img);
+  }
+  featEl.childNodes.forEach((n,i)=>n.className='fb'+(feats[i]?' on':''));
+  document.getElementById('fhex').textContent=
+    'features 0x'+toHex(Array.from(feats));
+
+  if(!sc) sc=runHead(feats,head);
+  const sel=document.getElementById('headsel').value;
+  drawBars(document.getElementById('bars'), CHIP.heads[sel].characters, sc, 20);
+
+  const soft=runSoftHead(feats);
+  const idx=soft.map((v,i)=>[v,i]).sort((a,b)=>b[0]-a[0]).slice(0,6);
+  drawBars(document.getElementById('sbars'),
+           idx.map(p=>CHIP.byclass[p[1]]), idx.map(p=>p[0]), 20);
+
+  const blank=img.reduce((a,b)=>a+b,0)===0;
+  document.getElementById('snote').className='note'+(blank?' warn':'');
+  document.getElementById('snote').textContent=
+    blank ? 'canvas empty' : 'top 6 of 62';
+}
+
+const sel=document.getElementById('headsel');
+function initHeads(){
+  Object.keys(CHIP.heads).forEach(k=>{
+    const o=document.createElement('option');
+    o.value=k;
+    o.textContent=k+(CHIP.heads[k].accuracy?'  ('+CHIP.heads[k].accuracy.toFixed(2)+')':'');
+    sel.appendChild(o);
+  });
+  loadSelected();
+}
+async function loadSelected(){
+  const h=CHIP.heads[sel.value];
+  head=unpackHead(h.bitstream);
+  buildBars(document.getElementById('bars'),h.characters);
+  buildBars(document.getElementById('sbars'),['','','','','','']);
+  if(source==='hw'&&writer) await hwLoadHead();
+  update();
+}
+sel.onchange=loadSelected;
+
+document.getElementById('src-sim').onclick=()=>{
+  source='sim';
+  document.getElementById('src-sim').classList.add('on');
+  document.getElementById('src-hw').classList.remove('on');
+  document.getElementById('connect').style.display='none';
+  setHw(false,'simulating the datapath');
+  document.querySelector('#hwstat .dot').style.background='var(--dim)';
+  update();
+};
+document.getElementById('src-hw').onclick=()=>{
+  source='hw';
+  document.getElementById('src-hw').classList.add('on');
+  document.getElementById('src-sim').classList.remove('on');
+  document.getElementById('connect').style.display='';
+  if(!writer) setHw(false,'not connected \u2014 silicon arrives 2027-08');
+  update();
+};
+document.getElementById('connect').onclick=hwConnect;
+
+paint();
+if(CHIP) initHeads();
+</script>
+</body>
+</html>
