@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Verify the generated top-level RTL against numpy. Run before every push."""
-import sys, json, subprocess, tempfile
+import json
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
+
 import numpy as np
+
 
 def main(npz="weights_f56.npz", src="../src", n_img=8):
     meta = json.load(open("head_bitstream.json"))

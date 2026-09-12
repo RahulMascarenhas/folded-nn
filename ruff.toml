@@ -1,0 +1,14 @@
+line-length = 88
+
+[lint]
+select = ["E", "F", "I", "W"]
+ignore = [
+  "E501",     # long lines, mostly generated Verilog strings
+  "E741",     # `l` means lane in the RTL emitters
+  "E701",     # one-line if for short array clamps
+  "E702",     # semicolons in short scripts
+  "PLW1510",  # subprocess without check= : returncode is inspected
+  "BLE001",   # blind except: deliberate user-facing fallbacks
+  "SIM115",   # open() without a context manager in short scripts
+  "RUF046",   # int(round(...)) is clearer here
+]
