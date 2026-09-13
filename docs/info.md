@@ -29,7 +29,7 @@ five points against a fully trained network.
 | `ui[2]` | start |
 | `ui[3]` / `ui[4]` | head bit / shift |
 | `ui[5]` | advance feature readout |
-| `uo[7:0]` | signed score |
+| `uo[7:0]` | signed score while busy; winning class once `uio[1]` is high |
 | `uio[0]` / `uio[1]` / `uio[2]` | valid / done / busy |
 | `uio[5:3]` | class index |
 | `uio[6]` / `uio[7]` | feature bit / last feature |
