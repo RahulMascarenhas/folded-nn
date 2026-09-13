@@ -25,13 +25,13 @@ from pathlib import Path
 
 import numpy as np
 
-PIXELS, FEATURES, CLASSES = 64, 56, 6
+PIXELS, FEATURES, CLASSES = 64, 56, 6  # overwritten from the weights file
 LANES, PASSES = 8, 7
 ACC_W, BIAS_W = 9, 8
 HEAD_BITS = 2 * FEATURES * CLASSES + BIAS_W * CLASSES  # 720
 
 HERE = Path(__file__).resolve().parent
-WEIGHTS = HERE / "weights_f56.npz"
+WEIGHTS = HERE / "weights_g12_f56.npz"
 
 # EMNIST byclass label order: 0-9, A-Z, a-z
 BYCLASS = (
@@ -53,15 +53,17 @@ def centre(imgs):
     Measured: +12 to +19 points on out-of-domain symbols.
     """
     a = np.atleast_2d(np.asarray(imgs, dtype=np.int32))
+    side = int(round(a.shape[1] ** 0.5))
+    mid = (side - 1) / 2.0
     out = np.zeros_like(a)
     for i, v in enumerate(a):
-        g = v.reshape(8, 8)
+        g = v.reshape(side, side)
         if g.sum() == 0:
             out[i] = v
             continue
         ys, xs = np.nonzero(g)
-        dy = int(round(3.5 - ys.mean()))
-        dx = int(round(3.5 - xs.mean()))
+        dy = int(round(mid - ys.mean()))
+        dx = int(round(mid - xs.mean()))
         h = np.roll(np.roll(g, dy, axis=0), dx, axis=1)
         if dy > 0:
             h[:dy] = 0
@@ -71,7 +73,7 @@ def centre(imgs):
             h[:, :dx] = 0
         elif dx < 0:
             h[:, dx:] = 0
-        out[i] = h.reshape(64)
+        out[i] = h.reshape(side * side)
     return out[0] if np.ndim(imgs) == 1 else out
 
 
@@ -82,21 +84,22 @@ class Chip:
     """Integer model of the silicon. No floats anywhere in the datapath."""
 
     def __init__(self, W1, b1):
-        self.W1 = np.asarray(W1, dtype=np.int32)  # (56, 64) ternary
+        self.W1 = np.asarray(W1, dtype=np.int32)  # (features, pixels)
+        self.pixels = self.W1.shape[1]
         self.b1 = np.asarray(b1, dtype=np.int32)
         self.head = None  # loaded over SPI
 
     # --- the frozen half, cast into logic -----------------------------
 
     def features(self, img64):
-        """8 accumulators over 7 passes, 448 cycles. Sign bit is the output."""
-        img = np.asarray(img64, dtype=np.int32).reshape(PIXELS)
+        """LANES accumulators over PASSES passes. Sign bit is the output."""
+        img = np.asarray(img64, dtype=np.int32).reshape(self.pixels)
         out = np.zeros(FEATURES, dtype=np.int32)
         for p in range(PASSES):
             for l in range(LANES):
                 f = p * LANES + l
                 acc = int(self.b1[f])
-                for i in range(PIXELS):
+                for i in range(self.pixels):
                     if img[i]:
                         acc += int(self.W1[f, i])
                 self._check(acc, ACC_W, f"backbone acc f{f}")
@@ -155,7 +158,10 @@ class Chip:
                 f"[{lo}, {hi}] -- would wrap in silicon"
             )
 
-    cycles = PIXELS * PASSES + FEATURES * CLASSES  # 784
+    @property
+    def cycles(self):
+        """Pixels shifted through PASSES passes, then the head."""
+        return self.pixels * PASSES + FEATURES * CLASSES
 
 
 # ------------------------------------------------------------ bitstream
@@ -198,7 +204,7 @@ def fit_head(feats, labels, epochs=400, lr=0.02, thresh=0.5, seed=0):
     """
     rng = np.random.default_rng(seed)
     n_cls = int(labels.max()) + 1
-    W = rng.normal(0, 0.5, (FEATURES, n_cls)).astype(np.float32)
+    W = rng.normal(0, 0.5, (feats.shape[1], n_cls)).astype(np.float32)
     b = np.zeros(n_cls, dtype=np.float32)
     mW = np.zeros_like(W)
     vW = np.zeros_like(W)
@@ -239,7 +245,7 @@ def fit_head(feats, labels, epochs=400, lr=0.02, thresh=0.5, seed=0):
 # ------------------------------------------------------------------ data
 
 
-def load_emnist(split="byclass", pix=0.25, chunk=20000):
+def load_emnist(split="byclass", pix=0.25, chunk=20000, grid=8):
     """Load from ~/.cache/emnist-idx/.
 
     Chunked: byclass has ~700k images, and converting them all to float32 at
@@ -255,15 +261,20 @@ def load_emnist(split="byclass", pix=0.25, chunk=20000):
             dims = [int.from_bytes(f.read(4), "big") for _ in range(magic[3])]
             return np.frombuffer(f.read(), dtype=np.uint8).reshape(dims)
 
+    k = -(-28 // grid)
+    pad = (grid * k - 28) // 2
+    px = grid * grid
+
     def to8(a):
         n = len(a)
-        out = np.empty((n, 64), dtype=np.int32)
+        out = np.empty((n, px), dtype=np.int32)
         for i in range(0, n, chunk):
             c = a[i : i + chunk].transpose(0, 2, 1).astype(np.float32) / 255.0
             m = len(c)
-            c = np.pad(c, ((0, 0), (2, 2), (2, 2)))
-            c = c.reshape(m, 8, 4, 8, 4).mean(axis=(2, 4))
-            out[i : i + m] = (c > pix).astype(np.int32).reshape(m, 64)
+            if pad:
+                c = np.pad(c, ((0, 0), (pad, pad), (pad, pad)))
+            c = c.reshape(m, grid, k, grid, k).mean(axis=(2, 4))
+            out[i : i + m] = (c > pix).astype(np.int32).reshape(m, px)
         return out
 
     return (
@@ -288,7 +299,7 @@ def fit_software_head(feats, labels, n_cls, epochs=300, lr=0.05, seed=0):
     ternarising it throws away capacity for nothing.
     """
     rng = np.random.default_rng(seed)
-    W = rng.normal(0, 0.1, (FEATURES, n_cls)).astype(np.float32)
+    W = rng.normal(0, 0.1, (feats.shape[1], n_cls)).astype(np.float32)
     b = np.zeros(n_cls, dtype=np.float32)
     mW = np.zeros_like(W)
     vW = np.zeros_like(W)
@@ -341,18 +352,23 @@ def main():
         help="fit a full-precision 62-class head for the host",
     )
     ap.add_argument("--out", default="heads")
+    ap.add_argument("--weights", default=str(WEIGHTS))
     ap.add_argument("--epochs", type=int, default=400)
     args = ap.parse_args()
 
-    d = np.load(WEIGHTS)
+    d = np.load(args.weights)
+    global PIXELS
+    PIXELS = int(d["pixels"]) if "pixels" in d else d["W1"].shape[1]
+    GRID = int(round(PIXELS**0.5))
     chip = Chip(d["W1"], d["b1"])
 
     if args.list:
         meta = json.loads((HERE / "head_bitstream.json").read_text())
         print(f"module       {meta['module']}")
+        print(f"input        {PIXELS} px ({GRID}x{GRID})")
         print(f"features     {FEATURES}   ({LANES} lanes, {PASSES} passes)")
         print(f"head         {HEAD_BITS} bits = {HEAD_BITS // 8} bytes")
-        print(f"cycles       {Chip.cycles} per inference")
+        print(f"cycles       {chip.cycles} per inference")
         print(f"shipped head classes: {' '.join(BYCLASS[i] for i in range(CLASSES))}")
         print(f"\navailable characters ({len(BYCLASS)}):")
         print("  " + " ".join(BYCLASS))
@@ -360,7 +376,7 @@ def main():
 
     if args.fit_software:
         print("loading emnist byclass ...")
-        xtr, ytr, xte, yte = load_emnist()
+        xtr, ytr, xte, yte = load_emnist(grid=GRID)
         n_cls = int(max(ytr.max(), yte.max())) + 1
         print("computing frozen features ...")
         F = (xtr @ chip.W1.T + chip.b1 >= 0).astype(np.float32)
@@ -397,7 +413,7 @@ def main():
         ap.error("give --fit, --fit-random or --list")
 
     print("loading emnist byclass ...")
-    xtr, ytr, xte, yte = load_emnist()
+    xtr, ytr, xte, yte = load_emnist(grid=GRID)
 
     print("computing frozen features (the part cast into silicon) ...")
     F = (xtr @ chip.W1.T + chip.b1 >= 0).astype(np.int32)
