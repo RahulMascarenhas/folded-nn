@@ -28,6 +28,7 @@ module head (
     reg [2:0] cidx;
     reg signed [7:0] acc;
 
+    wire [3:0] cnext = {1'b0, cidx} + 4'd1;
     wire [1:0] wsel = wreg[2*(cidx*56 + widx) +: 2];
     wire fbit = features[widx];
     wire signed [7:0] nxt =
@@ -51,7 +52,7 @@ module head (
                     busy <= 1'b0;
                 end else begin
                     cidx <= cidx + 1;
-                    acc <= $signed(wreg[2*336 + 8*(cidx + 1) +: 8]);
+                    acc <= $signed(wreg[2*336 + 8*cnext +: 8]);
                 end
             end else begin
                 widx <= widx + 1;

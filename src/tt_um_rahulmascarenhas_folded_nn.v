@@ -17,7 +17,8 @@
 //   ui_in[3]  hd_bit      head bitstream data
 //   ui_in[4]  hd_shift    shift one head bit in
 //   ui_in[5]  feat_shift  advance the feature readout
-//   uo_out    score       signed 8-bit, one class at a time
+//   uo_out    score       signed 8-bit while busy;
+//                         winning class index once done is high
 //   uio_out[0] score_valid
 //   uio_out[1] done          all 6 scores emitted
 //   uio_out[2] busy
@@ -92,7 +93,24 @@ module tt_um_rahulmascarenhas_folded_nn (
         else if (score_valid && score_idx == 3'd5) done <= 1'b1;
     end
 
-    assign uo_out  = score;
+    // On-die argmax: a running max over the six scores as they appear.
+    // Costs no cycles, since the scores already arrive one per score_valid.
+    // The six scores still shift out during the inference; the winner
+    // replaces them on uo_out once done goes high, so a host can take
+    // either without a mode bit.
+    reg signed [7:0] best;
+    reg [2:0] best_idx;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            best <= -8'sd128; best_idx <= 3'd0;
+        end else if (go) begin
+            best <= -8'sd128; best_idx <= 3'd0;
+        end else if (score_valid && $signed(score) > best) begin
+            best <= score; best_idx <= score_idx;
+        end
+    end
+
+    assign uo_out  = done ? {{5{1'b0}}, best_idx} : score;
     assign uio_out = {feat_wrap, feat_bit, score_idx,
                       hd_busy | bb_busy, done, score_valid};
     assign uio_oe  = 8'hFF;

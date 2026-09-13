@@ -130,7 +130,11 @@ async def classify(dut, img_bits):
             scores[idx] = raw - 256 if raw > 127 else raw
         if (uio >> 1) & 1:
             break
-    return scores
+    # uo_out carries the winning class index once done is high. best and done
+    # settle on the same edge, so let the mux settle before sampling.
+    await Timer(1, "ns")
+    winner = _val(dut.uo_out) & 0x7
+    return scores, winner
 
 
 @cocotb.test()
@@ -141,9 +145,12 @@ async def test_inference(dut):
     await load_head(dut)
 
     for n, (img, expect) in enumerate(VECTORS):
-        got = await classify(dut, img)
+        got, win = await classify(dut, img)
         assert got == expect, f"image {n}: expected {expect}, got {got}"
-    dut._log.info(f"{len(VECTORS)} images, all scores bit-exact")
+        assert win == expect.index(max(expect)), (
+            f"image {n}: on-die argmax said {win}, expected "
+            f"{expect.index(max(expect))} from {expect}")
+    dut._log.info(f"{len(VECTORS)} images, scores and argmax bit-exact")
 
 
 @cocotb.test()
@@ -156,10 +163,10 @@ async def test_reload_head(dut):
     cocotb.start_soon(Clock(dut.clk, 100, units="ns").start())
     await reset(dut)
     await load_head(dut)
-    first = await classify(dut, VECTORS[0][0])
+    first, _ = await classify(dut, VECTORS[0][0])
 
     await load_head(dut)
-    second = await classify(dut, VECTORS[0][0])
+    second, _ = await classify(dut, VECTORS[0][0])
     assert first == second, f"reload changed the result: {first} vs {second}"
 
 
@@ -230,7 +237,7 @@ async def test_reset_midway(dut):
 
     await reset(dut)
     await load_head(dut)
-    got = await classify(dut, VECTORS[0][0])
+    got, _ = await classify(dut, VECTORS[0][0])
     assert got == VECTORS[0][1], f"after reset: expected {VECTORS[0][1]}, got {got}"
 '''
 

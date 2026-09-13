@@ -208,6 +208,7 @@ module head (
     reg [{cw - 1}:0] cidx;
     reg signed [{BIAS_W - 1}:0] acc;
 
+    wire [{cw}:0] cnext = {{1'b0, cidx}} + {cw + 1}'d1;
     wire [1:0] wsel = wreg[2*(cidx*{n_feat} + widx) +: 2];
     wire fbit = features[widx];
     wire signed [{BIAS_W - 1}:0] nxt =
@@ -231,7 +232,7 @@ module head (
                     busy <= 1'b0;
                 end else begin
                     cidx <= cidx + 1;
-                    acc <= $signed(wreg[2*{n_w} + {BIAS_W}*(cidx + 1) +: {BIAS_W}]);
+                    acc <= $signed(wreg[2*{n_w} + {BIAS_W}*cnext +: {BIAS_W}]);
                 end
             end else begin
                 widx <= widx + 1;
@@ -271,7 +272,8 @@ def emit_top(module, n_feat, n_class, lanes, passes, bits, n_px=64):
 //   ui_in[3]  hd_bit      head bitstream data
 //   ui_in[4]  hd_shift    shift one head bit in
 //   ui_in[5]  feat_shift  advance the feature readout
-//   uo_out    score       signed 8-bit, one class at a time
+//   uo_out    score       signed 8-bit while busy;
+//                         winning class index once done is high
 //   uio_out[0] score_valid
 //   uio_out[1] done          all {n_class} scores emitted
 //   uio_out[2] busy
@@ -346,7 +348,24 @@ module {module} (
         else if (score_valid && score_idx == {cw}'d{n_class - 1}) done <= 1'b1;
     end
 
-    assign uo_out  = score;
+    // On-die argmax: a running max over the six scores as they appear.
+    // Costs no cycles, since the scores already arrive one per score_valid.
+    // The six scores still shift out during the inference; the winner
+    // replaces them on uo_out once done goes high, so a host can take
+    // either without a mode bit.
+    reg signed [{BIAS_W - 1}:0] best;
+    reg [{cw - 1}:0] best_idx;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            best <= -{BIAS_W}'sd128; best_idx <= {cw}'d0;
+        end else if (go) begin
+            best <= -{BIAS_W}'sd128; best_idx <= {cw}'d0;
+        end else if (score_valid && $signed(score) > best) begin
+            best <= score; best_idx <= score_idx;
+        end
+    end
+
+    assign uo_out  = done ? {{{{{8 - cw}{{1'b0}}}}, best_idx}} : score;
     assign uio_out = {{feat_wrap, feat_bit, score_idx,
                       hd_busy | bb_busy, done, score_valid}};
     assign uio_oe  = 8'hFF;
