@@ -26,7 +26,7 @@ BYCLASS = (
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--weights", default=str(HERE / "weights_f56.npz"))
+    ap.add_argument("--weights", default=str(HERE / "weights_g12_f56.npz"))
     ap.add_argument("--template", default=str(HERE / "demo_template.html"))
     ap.add_argument("--heads", nargs="*", default=[])
     ap.add_argument("--out", default=str(HERE / "demo.html"))
@@ -85,6 +85,8 @@ def main():
         "b2": b2.tolist(),
         "byclass": soft_labels,
         "heads": heads,
+        "pixels": int(W1.shape[1]),
+        "pix_thresh": float(d["pix_thresh"]) if "pix_thresh" in d else 0.15,
         "zero_rate": float((W1 == 0).mean()),
     }
 

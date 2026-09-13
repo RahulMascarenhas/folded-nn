@@ -93,9 +93,9 @@
   </div>
 
   <div class="panel">
-    <div class="label">8&times;8 in</div>
+    <div class="label" id="inlabel">in</div>
     <div class="grid8" id="px"></div>
-    <div class="stat">64 bits on <code>ui[0]</code></div>
+    <div class="stat" id="pxcount">bits on <code>ui[0]</code></div>
   </div>
 
   <div class="panel">
@@ -134,7 +134,9 @@
 <!--CHIP_DATA-->
 <script>
 const CHIP = window.CHIP_DATA || null;
-const PIXELS=64, FEATURES=56, CLASSES=6, BIAS_W=8;
+const PIXELS = CHIP ? CHIP.pixels : 64;
+const GRID = Math.round(Math.sqrt(PIXELS));
+const FEATURES=56, CLASSES=6, BIAS_W=8;
 let source='sim', port=null, writer=null, reader=null;
 let normOn=true, head=null;
 
@@ -245,52 +247,74 @@ function setHw(ok,msg){
 }
 
 // --------------------------------------------------------- preprocessing
-function normalise(src){
-  // Crop to the ink, scale so the longer side fills 20/28, centre by mass.
-  // The same normalisation NIST applies, which the frozen features assume.
-  const N=200, TARGET=Math.round(N*20/28);
+function grey(src){
+  // Canvas -> a single greyscale plane in 0..1
+  const N=200, g=new Float32Array(N*N);
+  for(let i=0;i<N*N;i++) g[i]=src[i*4]/255;
+  return g;
+}
+
+function normalise(g){
+  // Match what NIST does, in greyscale throughout:
+  //   1. crop to the bounding box of the ink
+  //   2. area-average resample so the longer side fills 20/28, aspect kept
+  //   3. centre by centre of mass
+  // Staying greyscale matters: binarising first and pooling the result puts
+  // the two paths on different scales, so one threshold cannot suit both.
+  const N=200, TARGET=Math.round(N*20/28), INK=0.25;
   let minx=N,miny=N,maxx=-1,maxy=-1;
   for(let y=0;y<N;y++) for(let x=0;x<N;x++)
-    if(src[(y*N+x)*4]>60){
+    if(g[y*N+x]>INK){
       if(x<minx)minx=x; if(x>maxx)maxx=x;
       if(y<miny)miny=y; if(y>maxy)maxy=y;
     }
   if(maxx<0) return null;
-  const w=maxx-minx+1,h=maxy-miny+1;
+
+  const w=maxx-minx+1, h=maxy-miny+1;
   const sc=TARGET/Math.max(w,h);
   const nw=Math.max(1,Math.round(w*sc)), nh=Math.max(1,Math.round(h*sc));
+
+  // area average, not nearest neighbour -- nearest drops thin strokes
   const box=new Float32Array(nw*nh);
   for(let y=0;y<nh;y++) for(let x=0;x<nw;x++){
-    const sx=minx+Math.floor(x/sc), sy=miny+Math.floor(y/sc);
-    box[y*nw+x]= src[(sy*N+sx)*4]>60?1:0;
+    const sy0=miny+Math.floor(y/sc), sy1=Math.max(sy0+1,miny+Math.floor((y+1)/sc));
+    const sx0=minx+Math.floor(x/sc), sx1=Math.max(sx0+1,minx+Math.floor((x+1)/sc));
+    let sum=0,n=0;
+    for(let sy=sy0;sy<sy1&&sy<N;sy++) for(let sx=sx0;sx<sx1&&sx<N;sx++){
+      sum+=g[sy*N+sx]; n++;
+    }
+    box[y*nw+x]= n?sum/n:0;
   }
-  let n=0,cy=0,cx=0;
-  for(let y=0;y<nh;y++) for(let x=0;x<nw;x++)
-    if(box[y*nw+x]){n++;cy+=y;cx+=x;}
-  if(!n) return null;
-  cy/=n; cx/=n;
+
+  let m=0,cy=0,cx=0;
+  for(let y=0;y<nh;y++) for(let x=0;x<nw;x++){
+    const v=box[y*nw+x]; m+=v; cy+=y*v; cx+=x*v;
+  }
+  if(m<=0) return null;
+  cy/=m; cx/=m;
+
   const oy=Math.round(N/2-cy), ox=Math.round(N/2-cx);
   const frame=new Float32Array(N*N);
   for(let y=0;y<nh;y++) for(let x=0;x<nw;x++){
-    if(!box[y*nw+x]) continue;
-    const ty=y+oy,tx=x+ox;
-    if(ty>=0&&ty<N&&tx>=0&&tx<N) frame[ty*N+tx]=1;
+    const ty=y+oy, tx=x+ox;
+    if(ty>=0&&ty<N&&tx>=0&&tx<N) frame[ty*N+tx]=box[y*nw+x];
   }
   return frame;
 }
 
 function toGrid(){
-  const N=200, B=25;
-  const d=ctx.getImageData(0,0,N,N).data;
-  const g=new Int32Array(64);
-  const f = normOn ? normalise(d) : null;
-  for(let by=0;by<8;by++) for(let bx=0;bx<8;bx++){
-    let sum=0;
-    for(let y=0;y<B;y++) for(let x=0;x<B;x++){
-      const i=(by*B+y)*N+bx*B+x;
-      sum += f ? f[i] : d[i*4]/255;
-    }
-    g[by*8+bx]= (sum/(B*B))>0.25 ?1:0;
+  // Average-pool to GRID x GRID then threshold, exactly as training does.
+  const N=200;
+  const raw=grey(ctx.getImageData(0,0,N,N).data);
+  const f = normOn ? (normalise(raw) || raw) : raw;
+  const g=new Int32Array(PIXELS);
+  const T = CHIP.pix_thresh !== undefined ? CHIP.pix_thresh : 0.15;
+  for(let by=0;by<GRID;by++) for(let bx=0;bx<GRID;bx++){
+    const y0=Math.floor(by*N/GRID), y1=Math.floor((by+1)*N/GRID);
+    const x0=Math.floor(bx*N/GRID), x1=Math.floor((bx+1)*N/GRID);
+    let sum=0,n=0;
+    for(let y=y0;y<y1;y++) for(let x=x0;x<x1;x++){ sum+=f[y*N+x]; n++; }
+    g[by*GRID+bx]= (sum/n)>T ?1:0;
   }
   return g;
 }
@@ -301,7 +325,7 @@ let drawing=false, strokes=[];
 
 function paint(){
   ctx.fillStyle='#0d0f12'; ctx.fillRect(0,0,200,200);
-  ctx.strokeStyle='#e8eaed'; ctx.lineWidth=18;
+  ctx.strokeStyle='#e8eaed'; ctx.lineWidth=16;
   ctx.lineCap='round'; ctx.lineJoin='round';
   for(const s of strokes){
     if(s.length<2) continue;
@@ -327,7 +351,9 @@ document.getElementById('ctr').onclick=e=>{
 };
 
 const pxEl=document.getElementById('px'), featEl=document.getElementById('feat');
-for(let i=0;i<64;i++){const d=document.createElement('div');d.className='px';pxEl.appendChild(d);}
+pxEl.style.gridTemplateColumns=`repeat(${GRID}, ${GRID>8?11:16}px)`;
+for(let i=0;i<PIXELS;i++){const d=document.createElement('div');d.className='px';
+  if(GRID>8){d.style.width=d.style.height='11px';} pxEl.appendChild(d);}
 for(let i=0;i<56;i++){const d=document.createElement('div');d.className='fb';featEl.appendChild(d);}
 
 function buildBars(el,labels){
@@ -432,6 +458,8 @@ document.getElementById('src-hw').onclick=()=>{
 };
 document.getElementById('connect').onclick=hwConnect;
 
+document.getElementById('inlabel').textContent=`${GRID}\u00d7${GRID} in`;
+document.getElementById('pxcount').textContent=`${PIXELS} bits on ui[0]`;
 paint();
 if(CHIP) initHeads();
 </script>
