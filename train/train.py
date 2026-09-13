@@ -36,29 +36,47 @@ import numpy as np
 # --------------------------------------------------------------- data
 
 
-def to_8x8_binary(images, threshold=0.15, chunk=20000):
-    """28x28 greyscale -> 8x8 binary.
+def pool_params(grid):
+    """Pad and pool factors that take 28x28 down to grid x grid evenly.
 
-    Pad to 32x32 then average-pool 4x4, which divides evenly and keeps the
-    whole glyph. Then threshold at a fraction of full scale.
-
-    Chunked, because byclass has 814k images and converting them all to
-    float32 at once needs several GB.
+    8  -> pad 2, pool 4      12 -> pad 4, pool 3
+    10 -> pad 1, pool 3      14 -> pad 0, pool 2
     """
+    k = -(-28 // grid)  # ceil
+    size = grid * k
+    pad = (size - 28) // 2
+    return pad, k
+
+
+def to_grid_binary(images, grid=8, threshold=0.15, chunk=20000):
+    """28x28 greyscale -> grid x grid binary.
+
+    Pad so the size divides evenly, average-pool, then threshold at a
+    fraction of full scale. Chunked, because byclass has 698k images.
+    """
+    pad, k = pool_params(grid)
     n = images.shape[0]
-    out = np.empty((n, 64), dtype=np.float32)
+    px = grid * grid
+    out = np.empty((n, px), dtype=np.float32)
     for i in range(0, n, chunk):
         x = images[i : i + chunk].astype(np.float32) / 255.0
         m = x.shape[0]
-        x = np.pad(x, ((0, 0), (2, 2), (2, 2)))  # 28 -> 32
-        x = x.reshape(m, 8, 4, 8, 4).mean(axis=(2, 4))  # 32 -> 8
-        out[i : i + m] = (x > threshold).astype(np.float32).reshape(m, 64)
+        if pad:
+            x = np.pad(x, ((0, 0), (pad, pad), (pad, pad)))
+        x = x.reshape(m, grid, k, grid, k).mean(axis=(2, 4))
+        out[i : i + m] = (x > threshold).astype(np.float32).reshape(m, px)
     return out
 
 
+def to_8x8_binary(images, threshold=0.15, chunk=20000):
+    """Kept so older scripts keep working."""
+    return to_grid_binary(images, 8, threshold, chunk)
+
+
 def show(img64, label=""):
-    """ASCII art of one 8x8 image, to eyeball orientation."""
-    g = img64.reshape(8, 8)
+    """ASCII art of one image, to eyeball orientation."""
+    side = int(round(len(img64) ** 0.5))
+    g = img64.reshape(side, side)
     print(f"  sample: {label}")
     for row in g:
         print("    " + "".join("##" if v else ". " for v in row))
@@ -102,7 +120,7 @@ def fetch_idx(name):
     return dest
 
 
-def load_emnist_hf(split="balanced", transpose=True, pix=0.15):
+def load_emnist_hf(split="balanced", transpose=True, pix=0.15, grid=8):
     """Load EMNIST from local cache or the HuggingFace mirror. Converts each
     array to 8x8 immediately so the large uint8 arrays do not pile up."""
 
@@ -112,9 +130,9 @@ def load_emnist_hf(split="balanced", transpose=True, pix=0.15):
             a = a.transpose(0, 2, 1)
         return a
 
-    xtr = to_8x8_binary(get("idx3-ubyte.gz", "train-images"), pix)
+    xtr = to_grid_binary(get("idx3-ubyte.gz", "train-images"), grid, pix)
     ytr = read_idx(fetch_idx(f"emnist-{split}-train-labels-idx1-ubyte.gz"))
-    xte = to_8x8_binary(get("idx3-ubyte.gz", "test-images"), pix)
+    xte = to_grid_binary(get("idx3-ubyte.gz", "test-images"), grid, pix)
     yte = read_idx(fetch_idx(f"emnist-{split}-test-labels-idx1-ubyte.gz"))
 
     return xtr, ytr.astype(int), xte, yte.astype(int)
@@ -184,9 +202,9 @@ class Adam:
 
 
 class Net:
-    def __init__(self, n_feat, n_class, thresh=0.7, seed=0):
+    def __init__(self, n_feat, n_class, thresh=0.7, seed=0, n_in=64):
         rng = np.random.default_rng(seed)
-        self.W1 = rng.normal(0, 0.5, (64, n_feat)).astype(np.float32)
+        self.W1 = rng.normal(0, 0.5, (n_in, n_feat)).astype(np.float32)
         self.b1 = np.zeros(n_feat, dtype=np.float32)
         self.W2 = rng.normal(0, 0.5, (n_feat, n_class)).astype(np.float32)
         self.b2 = np.zeros(n_class, dtype=np.float32)
@@ -262,18 +280,24 @@ class Net:
         )
 
 
-def train(net, xtr, ytr, xte, yte, epochs, batch, l1, seed=0):
+def train(net, xtr, ytr, xte, yte, epochs, batch, l1, seed=0, decay=True):
     """Keeps the best epoch. Accuracy oscillates, so the last one is often
     not the one you want in silicon."""
     rng = np.random.default_rng(seed)
     n = len(xtr)
     best_acc, best_snap = 0.0, net.snapshot()
+    base_lr = {k: o.lr for k, o in net.opt.items()}
     for ep in range(epochs):
+        # cosine decay: a constant rate oscillates instead of settling
+        if decay:
+            f = 0.5 * (1 + np.cos(np.pi * ep / epochs))
+            for k, o in net.opt.items():
+                o.lr = base_lr[k] * (0.02 + 0.98 * f)
         order = rng.permutation(n)
         for i in range(0, n, batch):
             idx = order[i : i + batch]
             net.backward(net.forward(xtr[idx]), ytr[idx], l1=l1)
-        if ep % max(1, epochs // 20) == 0 or ep == epochs - 1:
+        if ep % max(1, epochs // 40) == 0 or ep == epochs - 1:
             acc = net.accuracy(xte, yte)
             if acc > best_acc:
                 best_acc, best_snap = acc, net.snapshot()
@@ -318,10 +342,19 @@ def main():
     )
     ap.add_argument("--no-transpose", action="store_true")
     ap.add_argument(
+        "--grid", type=int, default=8, help="input resolution, e.g. 8 or 12"
+    )
+    ap.add_argument(
         "--pix-thresh",
         type=float,
         default=0.15,
         help="pixel binarisation threshold; higher = thinner strokes",
+    )
+    ap.add_argument(
+        "--no-decay", action="store_true", help="constant learning rate (it oscillates)"
+    )
+    ap.add_argument(
+        "--seeds", type=int, default=1, help="train N times and keep the best"
     )
     ap.add_argument("--out-prefix", default="weights")
     args = ap.parse_args()
@@ -330,7 +363,7 @@ def main():
         print(f"loading emnist '{args.split}' via {args.source} ...")
         if args.source == "hf":
             xtr, ytr, xte, yte = load_emnist_hf(
-                args.split, not args.no_transpose, args.pix_thresh
+                args.split, not args.no_transpose, args.pix_thresh, args.grid
             )
         else:
             xtr, ytr, xte, yte = load_emnist(args.split, not args.no_transpose)
@@ -352,16 +385,38 @@ def main():
 
     for f in args.features:
         print(f"  training {f} features ...")
-        net = Net(f, n_class, thresh=args.thresh)
+        net = Net(f, n_class, thresh=args.thresh, n_in=xtr.shape[1])
         for k in net.opt:
             net.opt[k].lr = args.lr
-        acc = train(net, xtr, ytr, xte, yte, args.epochs, args.batch, args.l1)
+        best_acc, best_net = -1.0, None
+        for sd in range(args.seeds):
+            cand = Net(f, n_class, thresh=args.thresh, seed=sd, n_in=xtr.shape[1])
+            for k in cand.opt:
+                cand.opt[k].lr = args.lr
+            a = train(
+                cand,
+                xtr,
+                ytr,
+                xte,
+                yte,
+                args.epochs,
+                args.batch,
+                args.l1,
+                seed=sd,
+                decay=not args.no_decay,
+            )
+            if args.seeds > 1:
+                print(f"    seed {sd}: {a:.4f}")
+            if a > best_acc:
+                best_acc, best_net = a, cand
+        net, acc = best_net, best_acc
 
         W1q, b1, W2q, b2 = net.quantised()
         z1 = float((W1q == 0).mean())
         z2 = float((W2q == 0).mean())
 
-        path = f"{args.out_prefix}_f{f}.npz"
+        suffix = "" if args.grid == 8 else f"_g{args.grid}"
+        path = f"{args.out_prefix}{suffix}_f{f}.npz"
         np.savez(
             path,
             W1=W1q.T.astype(np.int8),
@@ -371,6 +426,9 @@ def main():
             features=f,
             classes=n_class,
             accuracy=acc,
+            grid=args.grid,
+            pixels=xtr.shape[1],
+            pix_thresh=args.pix_thresh,
             zero_rate_backbone=z1,
         )
 

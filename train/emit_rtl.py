@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 from emit_tests import emit_tb, emit_test_py
 
-PIXELS = 64
+PIXELS = 64  # set from the weights file at runtime
 ACC_W = 9
 BIAS_W = 8
 
@@ -37,12 +37,17 @@ def emit_backbone(W, biases, lanes):
     """One pixel per cycle from an on-chip image register, `lanes`
     accumulators reused across passes. Weights are constants, so +1 becomes
     a wire, -1 an inverter, and 0 disappears along with its adder input."""
-    n_feat = W.shape[0]
+    n_feat, n_px = W.shape
+    idx_w = max(1, (n_px - 1).bit_length())
     if n_feat % lanes:
         raise ValueError(f"{n_feat} features not divisible by {lanes} lanes")
     passes = n_feat // lanes
     pass_w = max(1, (passes - 1).bit_length())
-    rom_len = PIXELS * (1 << pass_w)
+    # {pnum, idx} strides by 2**idx_w, not by n_px -- with 64 pixels those
+    # happened to be equal. Fill at the concatenation's stride; the unused
+    # entries are zero and fold away at synthesis.
+    stride = 1 << idx_w
+    rom_len = stride * (1 << pass_w)
 
     def blit(f):
         b = int(biases[f])
@@ -67,15 +72,15 @@ def emit_backbone(W, biases, lanes):
         "    input  wire clk,",
         "    input  wire rst_n,",
         "    input  wire start,",
-        f"    input  wire [{PIXELS - 1}:0] img,",
+        f"    input  wire [{n_px - 1}:0] img,",
         f"    output reg  [{n_feat - 1}:0] features,",
         "    output reg  done,",
         "    output wire busy_o",
         ");",
-        "    reg [5:0] idx;",
+        f"    reg [{idx_w - 1}:0] idx;",
         f"    reg [{pass_w - 1}:0] pnum;",
         f"    wire [{pass_w - 1}:0] pnum_next = pnum + {pass_w}'d1;",
-        f"    wire [{pass_w + 5}:0] rom = {{pnum, idx}};",
+        f"    wire [{pass_w + idx_w - 1}:0] rom = {{pnum, idx}};",
         "    reg busy;",
         "    assign busy_o = busy;",
         "    wire pix = img[idx];",
@@ -87,11 +92,11 @@ def emit_backbone(W, biases, lanes):
         neg = ["0"] * rom_len
         for p in range(passes):
             f = p * lanes + l
-            for i in range(PIXELS):
+            for i in range(n_px):
                 if W[f, i] == 1:
-                    pos[p * PIXELS + i] = "1"
+                    pos[p * stride + i] = "1"
                 elif W[f, i] == -1:
-                    neg[p * PIXELS + i] = "1"
+                    neg[p * stride + i] = "1"
         L.append(
             f"    localparam [{rom_len - 1}:0] POS{l} = "
             f"{rom_len}'b{''.join(reversed(pos))};"
@@ -116,20 +121,20 @@ def emit_backbone(W, biases, lanes):
         "",
         "    always @(posedge clk) begin",
         "        if (!rst_n) begin",
-        "            idx <= 6'd0; pnum <= 0; busy <= 1'b0;",
+        f"            idx <= {idx_w}'d0; pnum <= 0; busy <= 1'b0;",
         "            done <= 1'b0; features <= 0;",
     ]
     for l in range(lanes):
         L.append(f"            acc{l} <= {ACC_W}'sd0;")
     L += [
         "        end else if (start) begin",
-        "            idx <= 6'd0; pnum <= 0; busy <= 1'b1; done <= 1'b0;",
+        f"            idx <= {idx_w}'d0; pnum <= 0; busy <= 1'b1; done <= 1'b0;",
     ]
     for l in range(lanes):
         L.append(f"            acc{l} <= {blit(l)};")
     L += [
         "        end else if (busy) begin",
-        "            if (idx == 6'd63) begin",
+        f"            if (idx == {idx_w}'d{n_px - 1}) begin",
         "                case (pnum)",
     ]
     for p in range(passes):
@@ -148,13 +153,13 @@ def emit_backbone(W, biases, lanes):
         f"                if (pnum == {pass_w}'d{passes - 1}) begin",
         "                    busy <= 1'b0; done <= 1'b1;",
         "                end else pnum <= pnum_next;",
-        "                idx <= 6'd0;",
+        f"                idx <= {idx_w}'d0;",
         "            end else begin",
     ]
     for l in range(lanes):
         L.append(f"                acc{l} <= nxt{l};")
     L += [
-        "                idx <= idx + 6'd1;",
+        f"                idx <= idx + {idx_w}'d1;",
         "            end",
         "        end else done <= 1'b0;",
         "    end",
@@ -203,6 +208,7 @@ module head (
     reg [{cw - 1}:0] cidx;
     reg signed [{BIAS_W - 1}:0] acc;
 
+    wire [{cw}:0] cnext = {{1'b0, cidx}} + {cw + 1}'d1;
     wire [1:0] wsel = wreg[2*(cidx*{n_feat} + widx) +: 2];
     wire fbit = features[widx];
     wire signed [{BIAS_W - 1}:0] nxt =
@@ -226,7 +232,7 @@ module head (
                     busy <= 1'b0;
                 end else begin
                     cidx <= cidx + 1;
-                    acc <= $signed(wreg[2*{n_w} + {BIAS_W}*(cidx + 1) +: {BIAS_W}]);
+                    acc <= $signed(wreg[2*{n_w} + {BIAS_W}*cnext +: {BIAS_W}]);
                 end
             end else begin
                 widx <= widx + 1;
@@ -244,14 +250,14 @@ endmodule
 # ------------------------------------------------------------------ top
 
 
-def emit_top(module, n_feat, n_class, lanes, passes, bits):
+def emit_top(module, n_feat, n_class, lanes, passes, bits, n_px=64):
     cw = max(1, (max(n_class - 1, 1)).bit_length())
     fw = max(1, (n_feat - 1).bit_length())
     return f"""// GENERATED by emit_rtl.py -- do not edit
 //
 // Frozen ternary feature extractor with an optional on-chip classifier.
 //
-//   64 pixels -> frozen {PIXELS}->{n_feat} layer (constant-folded into logic)
+//   {n_px} pixels -> frozen {n_px}->{n_feat} layer (constant-folded into logic)
 //             -> {n_feat} binary features
 //             -> either read them out directly, or
 //             -> loadable {n_feat}->{n_class} head ({bits} bits) -> {n_class} scores
@@ -266,7 +272,8 @@ def emit_top(module, n_feat, n_class, lanes, passes, bits):
 //   ui_in[3]  hd_bit      head bitstream data
 //   ui_in[4]  hd_shift    shift one head bit in
 //   ui_in[5]  feat_shift  advance the feature readout
-//   uo_out    score       signed 8-bit, one class at a time
+//   uo_out    score       signed 8-bit while busy;
+//                         winning class index once done is high
 //   uio_out[0] score_valid
 //   uio_out[1] done          all {n_class} scores emitted
 //   uio_out[2] busy
@@ -293,12 +300,12 @@ module {module} (
     wire hd_shift   = ui_in[4];
     wire feat_shift = ui_in[5];
 
-    // image register: shift {PIXELS} pixels in, then hold them still while
+    // image register: shift {n_px} pixels in, then hold them still while
     // the backbone makes {passes} passes over them
-    reg [{PIXELS - 1}:0] img;
+    reg [{n_px - 1}:0] img;
     always @(posedge clk) begin
         if (!rst_n)         img <= 0;
-        else if (img_shift) img <= {{img[{PIXELS - 2}:0], img_bit}};
+        else if (img_shift) img <= {{img[{n_px - 2}:0], img_bit}};
     end
 
     wire [{n_feat - 1}:0] features;
@@ -341,7 +348,24 @@ module {module} (
         else if (score_valid && score_idx == {cw}'d{n_class - 1}) done <= 1'b1;
     end
 
-    assign uo_out  = score;
+    // On-die argmax: a running max over the six scores as they appear.
+    // Costs no cycles, since the scores already arrive one per score_valid.
+    // The six scores still shift out during the inference; the winner
+    // replaces them on uo_out once done goes high, so a host can take
+    // either without a mode bit.
+    reg signed [{BIAS_W - 1}:0] best;
+    reg [{cw - 1}:0] best_idx;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            best <= -{BIAS_W}'sd128; best_idx <= {cw}'d0;
+        end else if (go) begin
+            best <= -{BIAS_W}'sd128; best_idx <= {cw}'d0;
+        end else if (score_valid && $signed(score) > best) begin
+            best <= score; best_idx <= score_idx;
+        end
+    end
+
+    assign uo_out  = done ? {{{{{8 - cw}{{1'b0}}}}, best_idx}} : score;
     assign uio_out = {{feat_wrap, feat_bit, score_idx,
                       hd_busy | bb_busy, done, score_valid}};
     assign uio_oe  = 8'hFF;
@@ -396,7 +420,10 @@ def main():
 
     d = np.load(args.npz)
     W1 = d["W1"].astype(int)
-    if W1.shape[1] != PIXELS:
+    # W1 is (features, pixels). The pixel count comes from the file, so an
+    # 8x8 or a 12x12 model both work without touching this script.
+    n_px = int(d["pixels"]) if "pixels" in d else max(W1.shape)
+    if W1.shape[1] != n_px:
         W1 = W1.T
     n_feat = W1.shape[0]
     b1 = d["b1"].astype(int) if "b1" in d else np.zeros(n_feat, int)
@@ -416,7 +443,7 @@ def main():
 
     _bits = 2 * n_feat * args.classes + BIAS_W * args.classes
     (out / f"{module}.v").write_text(
-        emit_top(module, n_feat, args.classes, args.lanes, passes, _bits)
+        emit_top(module, n_feat, args.classes, args.lanes, passes, _bits, n_px=n_px)
     )
 
     bits = 2 * n_feat * args.classes + BIAS_W * args.classes
@@ -424,7 +451,7 @@ def main():
 
     # test vectors from the numpy model
     rng = np.random.default_rng(11)
-    imgs = (rng.random((args.vectors, PIXELS)) < 0.22).astype(int)
+    imgs = (rng.random((args.vectors, n_px)) < 0.22).astype(int)
     feats = ((imgs @ W1.T + b1) >= 0).astype(int)
     scores = feats @ W2.T + b2
     vectors = [
@@ -445,7 +472,7 @@ def main():
             bits,
             stream,
             vectors,
-            PIXELS * passes + n_feat * args.classes,
+            n_px * passes + n_feat * args.classes,
             n_feat=n_feat,
             feat_vectors=feat_vectors,
         )
@@ -458,9 +485,10 @@ def main():
         "passes": passes,
         "head_bits": bits,
         "head_bytes": (bits + 7) // 8,
-        "backbone_cycles": PIXELS * passes,
+        "backbone_cycles": n_px * passes,
         "head_cycles": n_feat * args.classes,
-        "total_cycles": PIXELS * passes + n_feat * args.classes,
+        "total_cycles": n_px * passes + n_feat * args.classes,
+        "pixels": n_px,
         "zero_rate": float((W1 == 0).mean()),
         "bitstream": stream,
     }
@@ -470,6 +498,7 @@ def main():
     print(f"      {tdir}/tb.v, {tdir}/test.py")
     print("      head_bitstream.json\n")
     print(f"  module        {module}")
+    print(f"  input         {n_px} px ({int(n_px**0.5)}x{int(n_px**0.5)})")
     print(f"  features      {n_feat}  ({args.lanes} lanes, {passes} passes)")
     print(f"  zero rate     {(W1 == 0).mean():.1%}")
     print(f"  head          {bits} bits = {(bits + 7) // 8} bytes")
