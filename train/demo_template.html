@@ -60,6 +60,10 @@
   .dot{width:8px;height:8px;border-radius:50%;background:var(--bad);
        display:inline-block;margin-right:5px}
   .dot.ok{background:var(--hot)}
+  #winner{font-size:26px;font-weight:600;margin:0 0 12px;line-height:1.1}
+  #winner .lbl{font-size:10px;color:var(--dim);display:block;font-weight:400;
+               text-transform:uppercase;letter-spacing:.07em;margin-bottom:3px}
+  #winner.none{color:var(--dim);font-size:18px}
 </style>
 </head>
 <body>
@@ -110,12 +114,15 @@
 
   <div class="panel" style="flex:1;min-width:270px">
     <div class="label">on-chip head &mdash; 6 classes, 90 bytes</div>
+    <div id="winner">&mdash;</div>
     <div class="bars" id="bars"></div>
     <div class="row">
       <select id="headsel"></select>
     </div>
     <div class="stat">
-      336 loadable weights &middot; <b>75% of the die</b><br>
+      argmax is on the die &mdash; <code>uo[7:0]</code> holds the<br>
+      winning class once <code>uio[1]</code> is high, so no<br>
+      host is needed to read the answer<br>
       swap 90 bytes to retarget
     </div>
   </div>
@@ -197,7 +204,7 @@ function runSoftHead(feats){
 // The host firmware must implement:
 //   ->  H<720 ascii bits>\n   load head
 //   ->  I<64 ascii bits>\n    classify
-//   <-  F<56 ascii bits> S<6 signed ints>\n
+//   <-  F<56 ascii bits> S<6 signed ints> W<winning class>\n
 async function hwConnect(){
   if(!('serial' in navigator)){
     setHw(false,'Web Serial not supported in this browser'); return;
@@ -233,11 +240,12 @@ async function hwLoadHead(){
 async function hwClassify(img){
   const r=await hwSend('I'+Array.from(img).reverse().join(''));
   if(!r) return null;
-  const fm=r.match(/F([01]+)/), sm=r.match(/S([-\d ]+)/);
+  const fm=r.match(/F([01]+)/), sm=r.match(/S([-\d ]+)/), wm=r.match(/W(\d+)/);
   if(!fm) return null;
   return {
     feats:Int32Array.from(fm[1].split('').reverse().map(Number)),
-    sc: sm ? sm[1].trim().split(/\s+/).map(Number) : null
+    sc: sm ? sm[1].trim().split(/\s+/).map(Number) : null,
+    win: wm ? +wm[1] : null
   };
 }
 
@@ -392,11 +400,11 @@ async function update(){
   const img=toGrid();
   pxEl.childNodes.forEach((n,i)=>n.className='px'+(img[i]?' on':''));
 
-  let feats, sc=null;
+  let feats, sc=null, hwWin=null;
   if(source==='hw' && writer){
     const r=await hwClassify(img);
     if(!r){ setHw(false,'no response from device'); return; }
-    feats=r.feats; sc=r.sc;
+    feats=r.feats; sc=r.sc; hwWin=r.win;
   }else{
     feats=simFeatures(img);
   }
@@ -413,7 +421,15 @@ async function update(){
   drawBars(document.getElementById('sbars'),
            idx.map(p=>CHIP.byclass[p[1]]), idx.map(p=>p[0]), 20);
 
+  // the chip's own argmax: from hardware when connected, simulated otherwise
   const blank=img.reduce((a,b)=>a+b,0)===0;
+  const win = hwWin !== null ? hwWin : sc.indexOf(Math.max(...sc));
+  const wEl=document.getElementById('winner');
+  const labels=CHIP.heads[sel].characters;
+  wEl.className = blank ? 'none' : '';
+  wEl.innerHTML = blank
+    ? '<span class="lbl">chip says</span>nothing drawn'
+    : `<span class="lbl">chip says</span>${labels[win]}`;
   document.getElementById('snote').className='note'+(blank?' warn':'');
   document.getElementById('snote').textContent=
     blank ? 'canvas empty' : 'top 6 of 62';
