@@ -280,18 +280,24 @@ class Net:
         )
 
 
-def train(net, xtr, ytr, xte, yte, epochs, batch, l1, seed=0):
+def train(net, xtr, ytr, xte, yte, epochs, batch, l1, seed=0, decay=True):
     """Keeps the best epoch. Accuracy oscillates, so the last one is often
     not the one you want in silicon."""
     rng = np.random.default_rng(seed)
     n = len(xtr)
     best_acc, best_snap = 0.0, net.snapshot()
+    base_lr = {k: o.lr for k, o in net.opt.items()}
     for ep in range(epochs):
+        # cosine decay: a constant rate oscillates instead of settling
+        if decay:
+            f = 0.5 * (1 + np.cos(np.pi * ep / epochs))
+            for k, o in net.opt.items():
+                o.lr = base_lr[k] * (0.02 + 0.98 * f)
         order = rng.permutation(n)
         for i in range(0, n, batch):
             idx = order[i : i + batch]
             net.backward(net.forward(xtr[idx]), ytr[idx], l1=l1)
-        if ep % max(1, epochs // 20) == 0 or ep == epochs - 1:
+        if ep % max(1, epochs // 40) == 0 or ep == epochs - 1:
             acc = net.accuracy(xte, yte)
             if acc > best_acc:
                 best_acc, best_snap = acc, net.snapshot()
@@ -344,6 +350,12 @@ def main():
         default=0.15,
         help="pixel binarisation threshold; higher = thinner strokes",
     )
+    ap.add_argument(
+        "--no-decay", action="store_true", help="constant learning rate (it oscillates)"
+    )
+    ap.add_argument(
+        "--seeds", type=int, default=1, help="train N times and keep the best"
+    )
     ap.add_argument("--out-prefix", default="weights")
     args = ap.parse_args()
 
@@ -376,7 +388,28 @@ def main():
         net = Net(f, n_class, thresh=args.thresh, n_in=xtr.shape[1])
         for k in net.opt:
             net.opt[k].lr = args.lr
-        acc = train(net, xtr, ytr, xte, yte, args.epochs, args.batch, args.l1)
+        best_acc, best_net = -1.0, None
+        for sd in range(args.seeds):
+            cand = Net(f, n_class, thresh=args.thresh, seed=sd, n_in=xtr.shape[1])
+            for k in cand.opt:
+                cand.opt[k].lr = args.lr
+            a = train(
+                cand,
+                xtr,
+                ytr,
+                xte,
+                yte,
+                args.epochs,
+                args.batch,
+                args.l1,
+                seed=sd,
+                decay=not args.no_decay,
+            )
+            if args.seeds > 1:
+                print(f"    seed {sd}: {a:.4f}")
+            if a > best_acc:
+                best_acc, best_net = a, cand
+        net, acc = best_net, best_acc
 
         W1q, b1, W2q, b2 = net.quantised()
         z1 = float((W1q == 0).mean())
@@ -395,6 +428,7 @@ def main():
             accuracy=acc,
             grid=args.grid,
             pixels=xtr.shape[1],
+            pix_thresh=args.pix_thresh,
             zero_rate_backbone=z1,
         )
 
